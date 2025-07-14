@@ -279,6 +279,29 @@ func main() {
 		}
 	}()
 
+	// Start database health check goroutine
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				// Try to ping the database
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := dbPool.Ping(ctx)
+				cancel()
+				
+				if err != nil {
+					log.Fatalf("Database health check failed: %s", err)
+				}
+				log.Trace("Database health check passed")
+			case <-ctxCancel.Done():
+				return
+			}
+		}
+	}()
+
 	// Wait here for interrupt signal
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -303,7 +326,13 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 	// Draw a connection from the pool to use for listening
 	conn, err := socketInfo.db.Acquire(ctx)
 	if err != nil {
-		log.Fatalf("Error acquiring connection: %s", err)
+		// Check if this is a context cancellation (normal shutdown)
+		if ctx.Err() != nil {
+			log.Debugf("Connection acquisition cancelled: %s", err)
+			return
+		}
+		// Otherwise, this is a database connection error
+		log.Fatalf("Error acquiring database connection: %s", err)
 	}
 	defer conn.Release()
 	log.Infof("Listening to the '%s' database channel\n", listenChannel)
@@ -319,8 +348,13 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 	for {
 		notification, err := conn.Conn().WaitForNotification(ctx)
 		if err != nil {
-			log.Debugf("WaitForNotification, %s", err)
-			return
+			// Check if this is a context cancellation (normal shutdown)
+			if ctx.Err() != nil {
+				log.Debugf("WaitForNotification context cancelled: %s", err)
+				return
+			}
+			// Otherwise, this is a database connection error
+			log.Fatalf("Database connection lost on channel '%s': %s", listenChannel, err)
 		}
 
 		log.Debugf("NOTIFY received, channel '%s', payload '%s'",
