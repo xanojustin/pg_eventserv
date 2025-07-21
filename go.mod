@@ -4,22 +4,22 @@ go 1.18
 
 require (
 	github.com/gorilla/mux v1.8.0
-	github.com/gorilla/websocket v1.5.0
-	github.com/jackc/pgconn v1.13.0
 	github.com/jackc/pgx/v4 v4.17.2
 	github.com/komem3/glob v0.0.0-20220810040902-7dfb5f3c78ae
 	github.com/pborman/getopt/v2 v2.1.0
 	github.com/redis/go-redis/v9 v9.3.0
 	github.com/sirupsen/logrus v1.9.0
 	github.com/spf13/viper v1.13.0
-	github.com/teivah/broadcast v0.1.0
 	github.com/theckman/httpforwarded v0.4.0
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
+	github.com/jackc/pgconn v1.13.0 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgproto3/v2 v2.3.1 // indirect
