@@ -52,7 +52,18 @@ func redisPublish(ctx context.Context, channel string, message string) error {
 		return fmt.Errorf("Redis client not initialized")
 	}
 
-	err := globalRedis.Publish(ctx, channel, message).Err()
+	// Get the configured list key
+	listKey := viper.GetString("RedisListKey")
+
+	// First, push the message to the Redis list
+	err := globalRedis.RPush(ctx, listKey, message).Err()
+	if err != nil {
+		return fmt.Errorf("failed to push to Redis list %s: %w", listKey, err)
+	}
+	log.Debugf("Pushed message to Redis list '%s': %s", listKey, message)
+
+	// Then publish notification to the channel
+	err = globalRedis.Publish(ctx, channel, message).Err()
 	if err != nil {
 		return fmt.Errorf("failed to publish to Redis channel %s: %w", channel, err)
 	}

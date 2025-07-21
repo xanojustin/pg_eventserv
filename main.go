@@ -59,6 +59,7 @@ func init() {
 	viper.SetDefault("DbPoolMaxConnLifeTime", "1h")
 	viper.SetDefault("DbPoolMaxConns", 4)
 	viper.SetDefault("ListenChannel", "channelname")
+	viper.SetDefault("RedisListKey", "channelevents")
 	if programVersion == "" {
 		programVersion = "latest"
 	}
