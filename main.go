@@ -166,7 +166,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ticker.C:
@@ -174,7 +174,7 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				err := dbPool.Ping(ctx)
 				cancel()
-				
+
 				if err != nil {
 					log.Fatalf("Database health check failed: %s", err)
 				}
@@ -217,7 +217,7 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 		log.Fatalf("Error acquiring database connection: %s", err)
 	}
 	defer conn.Release()
-	log.Infof("Listening to the '%s' database channel\n", listenChannel)
+	log.Infof("Listening to the '%s' database channel", listenChannel)
 
 	// Send the LISTEN command to the connection
 	listenSQL := fmt.Sprintf("LISTEN %s", pgx.Identifier{listenChannel}.Sanitize())
