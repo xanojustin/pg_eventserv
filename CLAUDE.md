@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-pg_eventserv is a PostgreSQL event server written in Go that bridges PostgreSQL's NOTIFY/LISTEN functionality with WebSocket clients for real-time applications.
+pg_eventserv is a PostgreSQL event server written in Go that bridges PostgreSQL's NOTIFY/LISTEN functionality with Redis pub/sub channels, allowing any Redis client to receive PostgreSQL notifications.
 
 ## Development Commands
 
@@ -25,8 +25,9 @@ make release
 
 ### Running
 ```bash
-# Set database connection
+# Set database and Redis connections
 export DATABASE_URL=postgresql://username:password@host/dbname
+export ES_REDISADDR=localhost:6379
 
 # Run the server
 ./pg_eventserv
@@ -36,30 +37,31 @@ export DATABASE_URL=postgresql://username:password@host/dbname
 ```
 
 ### Testing
-The project has no automated tests. Use the built-in web interface at http://localhost:7700/ or the example applications in `/examples/` for manual testing.
+The project has no automated tests. Use the built-in web interface at http://localhost:7700/ to start channel listeners, and use any Redis client to subscribe to channels for testing.
 
 ## Architecture
 
 ### Core Components
 
-1. **main.go**: HTTP server setup, WebSocket routing, and signal handling
+1. **main.go**: HTTP server setup, channel listener management, and signal handling
 2. **db.go**: PostgreSQL connection pool management using pgx
-3. **util.go**: URL formatting and proxy header utilities
+3. **redis.go**: Redis client and pub/sub functionality
+4. **util.go**: URL formatting and proxy header utilities
 
 ### Request Flow
 
-1. Client connects to WebSocket endpoint: `ws://host:7700/listen/{channel}`
+1. Client makes HTTP request to: `http://host:7700/listen/{channel}`
 2. Channel name validated against allowed patterns (glob matching)
 3. Database listener goroutine created for new channels
-4. PostgreSQL NOTIFY events forwarded to all WebSocket clients on that channel
-5. Broadcast relay manages multiple clients per channel
+4. PostgreSQL NOTIFY events are published to Redis channels
+5. Redis subscribers receive events via pub/sub
 
 ### Key Dependencies
 
-- `gorilla/mux` & `gorilla/websocket`: HTTP routing and WebSocket handling
+- `gorilla/mux`: HTTP routing
 - `jackc/pgx/v4`: PostgreSQL driver with connection pooling
+- `redis/go-redis/v9`: Redis client library
 - `spf13/viper`: Configuration management (TOML files, env vars, flags)
-- `teivah/broadcast`: Thread-safe message broadcasting
 - `komem3/glob`: Channel pattern matching
 
 ### Configuration Hierarchy
@@ -83,12 +85,12 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
-### WebSocket Protocol
+### Redis Integration
 
-- Clients receive raw NOTIFY payloads
-- Connection kept alive with 2-second ping/pong
-- No authentication built-in (relies on channel pattern access control)
+- Events published to Redis channels with same name as PostgreSQL channel
+- No authentication built-in (relies on Redis security and channel pattern access control)
 - Messages are typically JSON but can be any text
+- Supports all Redis pub/sub patterns and features
 
 ## Code Conventions
 

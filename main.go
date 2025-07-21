@@ -13,18 +13,11 @@ import (
 	"sync"
 	"time"
 
-	// Web Sockets Library
-	"github.com/gorilla/websocket"
-
 	// REST routing
 	"github.com/gorilla/mux"
 
 	// Pattern match channel names
 	"github.com/komem3/glob"
-
-	// Send multiple channel messages at once
-	// used to send notificaitons to web sockts
-	"github.com/teivah/broadcast"
 
 	// Configuration utilities
 	"github.com/pborman/getopt/v2"
@@ -34,7 +27,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	// PostgreSQL connection
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
@@ -47,70 +39,17 @@ const programName string = "pg_eventserv"
 // programVersion is the version string we use
 var programVersion string
 
-var globalSocketCount int = 0
 
 // globalDb is a global database connection pointer
 var globalDb *pgxpool.Pool = nil
 
-var upgrader = websocket.Upgrader{
-	HandshakeTimeout: time.Second,
-	ReadBufferSize:   1024,
-	WriteBufferSize:  1024,
-	Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
-		if _, errWrite := w.Write([]byte("websocket connection failed\n")); errWrite != nil {
-			log.Fatal("unable to write web socket error to output")
-		}
-		return
-	},
-	// Temporarily disable origin checking on the websockets upgrader
-	CheckOrigin:       func(r *http.Request) bool { return true },
-	EnableCompression: false,
+
+type RedisContext struct {
+	listenChannels      map[string]bool
+	listenChannelsMutex *sync.Mutex
+	db                  *pgxpool.Pool
 }
 
-type SocketContext struct {
-	relayPool      RelayPool
-	relayPoolMutex *sync.Mutex
-	db             *pgxpool.Pool
-}
-
-/**********************************************************************/
-
-type BcastRelay *broadcast.Relay[pgconn.Notification]
-type RelayPool map[string]BcastRelay
-
-// get a relay from the map if possible, otherwise
-// create a new one and store it in the map
-func (rm RelayPool) GetRelay(channel string) (er BcastRelay) {
-	if relay, ok := rm[channel]; ok {
-		return relay
-	}
-	rm[channel] = broadcast.NewRelay[pgconn.Notification]()
-	return rm[channel]
-}
-
-func (rm RelayPool) Close(channel string) {
-	if relay, ok := rm[channel]; ok {
-		(*relay).Close()
-		delete(rm, channel)
-	}
-}
-
-func (rm RelayPool) CloseAll() {
-	for channel, relay := range rm {
-		(*relay).Close()
-		delete(rm, channel)
-	}
-}
-
-func (rm RelayPool) HasChannel(channel string) bool {
-	if _, ok := rm[channel]; ok {
-		return true
-	} else {
-		return false
-	}
-}
-
-/**********************************************************************/
 
 func channelValid(checkChannel string) bool {
 	validList := viper.GetStringSlice("Channels")
@@ -129,10 +68,6 @@ func channelValid(checkChannel string) bool {
 	return false
 }
 
-func nextSocketNum() int {
-	globalSocketCount = globalSocketCount + 1
-	return globalSocketCount
-}
 
 /**********************************************************************/
 
@@ -140,9 +75,11 @@ func init() {
 	viper.SetDefault("DbConnection", "sslmode=disable")
 	viper.SetDefault("HttpHost", "0.0.0.0")
 	viper.SetDefault("HttpPort", 7700)
-	viper.SetDefault("HttpsPort", 7701)
-	viper.SetDefault("TlsServerCertificateFile", "")
-	viper.SetDefault("TlsServerPrivateKeyFile", "")
+	viper.SetDefault("RedisAddr", "localhost:6379")
+	viper.SetDefault("RedisPassword", "")
+	viper.SetDefault("RedisDB", 0)
+	viper.SetDefault("RedisMaxRetries", 3)
+	viper.SetDefault("RedisPoolSize", 10)
 	viper.SetDefault("UrlBase", "")
 	viper.SetDefault("Debug", false)
 	viper.SetDefault("AssetsPath", "./assets")
@@ -226,9 +163,8 @@ func main() {
 	basePath := viper.GetString("BasePath")
 	log.Infof("Serving HTTP  at %s/", formatBaseURL(fmt.Sprintf("http://%s:%d",
 		viper.GetString("HttpHost"), viper.GetInt("HttpPort")), basePath))
-	// log.Infof("Serving HTTPS at %s/", formatBaseURL(fmt.Sprintf("http://%s:%d",
-	// 	viper.GetString("HttpHost"), viper.GetInt("HttpsPort")), basePath))
 	log.Infof("Channels available: %s", strings.Join(viper.GetStringSlice("Channels"), ", "))
+	log.Infof("Redis server: %s", viper.GetString("RedisAddr"))
 
 	// Make a database connection pool
 	dbPool, err := dbConnect()
@@ -236,16 +172,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	socketCtx := SocketContext{
-		relayPool:      make(RelayPool),
-		relayPoolMutex: &sync.Mutex{},
-		db:             dbPool,
+	// Connect to Redis
+	_, err = redisConnect()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %s", err)
 	}
-	// relayMapMutex := &sync.Mutex{}
+
+	redisCtx := RedisContext{
+		listenChannels:      make(map[string]bool),
+		listenChannelsMutex: &sync.Mutex{},
+		db:                  dbPool,
+	}
 
 	ctxValue := context.WithValue(
 		context.Background(),
-		"socketCtx", socketCtx)
+		"redisCtx", redisCtx)
 	ctxCancel, cancel := context.WithCancel(ctxValue)
 
 	// HTTP router setup
@@ -257,8 +198,8 @@ func main() {
 	// Return front page
 	r.Handle("/", http.HandlerFunc(requestIndexHTML))
 	r.Handle("/index.html", http.HandlerFunc(requestIndexHTML))
-	// Initiate websocket subscription
-	r.Handle("/listen/{channel}", webSocketHandler(ctxCancel))
+	// Initiate Redis channel subscription
+	r.Handle("/listen/{channel}", redisChannelHandler(ctxCancel))
 
 	// Prepare the HTTP server object
 	// More "production friendly" timeouts
@@ -312,19 +253,18 @@ func main() {
 }
 
 // Goroutine to watch a PgSQL LISTEN/NOTIFY channel, and
-// send the notification object to the broadcast relay
-// when an event comes through
+// publish the notification to Redis
 func listenForNotify(ctx context.Context, listenChannel string) {
 
-	socketInfo := ctx.Value("socketCtx").(SocketContext)
+	redisInfo := ctx.Value("redisCtx").(RedisContext)
 
-	// read (and/or create) a broadcast relay for this listen channel name
-	socketInfo.relayPoolMutex.Lock()
-	relay := socketInfo.relayPool.GetRelay(listenChannel)
-	socketInfo.relayPoolMutex.Unlock()
+	// Mark this channel as being listened to
+	redisInfo.listenChannelsMutex.Lock()
+	redisInfo.listenChannels[listenChannel] = true
+	redisInfo.listenChannelsMutex.Unlock()
 
 	// Draw a connection from the pool to use for listening
-	conn, err := socketInfo.db.Acquire(ctx)
+	conn, err := redisInfo.db.Acquire(ctx)
 	if err != nil {
 		// Check if this is a context cancellation (normal shutdown)
 		if ctx.Err() != nil {
@@ -361,108 +301,46 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 			notification.Channel,
 			notification.Payload)
 
-		// Send the notification to all listeners connected to the relay
-		(*relay).NotifyCtx(ctx, *notification)
+		// Publish the notification to Redis
+		err = redisPublish(ctx, listenChannel, notification.Payload)
+		if err != nil {
+			log.Errorf("Failed to publish to Redis: %s", err)
+		}
 	}
 }
 
-// Generator function to create http.Handler to the http.Server
-// to run. Handler converts request to websocket, and sets up
-// goroutine to listen for broadcast messages from the db notification
-// goroutine. Websocket is held open by pinging client regularly.
-func webSocketHandler(ctx context.Context) http.Handler {
+// Handler to start listening to a PostgreSQL channel and publishing to Redis
+func redisChannelHandler(ctx context.Context) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wsChannel := mux.Vars(r)["channel"]
-		log.Debugf("request to open channel '%s' received", wsChannel)
+		channel := mux.Vars(r)["channel"]
+		log.Debugf("request to listen to channel '%s' received", channel)
 
-		socketInfo := ctx.Value("socketCtx").(SocketContext)
+		redisInfo := ctx.Value("redisCtx").(RedisContext)
 
 		// Check the channel name against the allow channel names list/patterns
-		if !channelValid(wsChannel) {
+		if !channelValid(channel) {
 			w.WriteHeader(403) // Forbidden
-			errMsg := fmt.Sprintf("requested channel '%s' is not allowed", wsChannel)
+			errMsg := fmt.Sprintf("requested channel '%s' is not allowed", channel)
 			log.Debug(errMsg)
 			w.Write([]byte(errMsg))
 			return
 		}
 
-		// Keep a unique number for each new socket we create
-		wsNumber := nextSocketNum()
+		// Check if we're already listening to this channel
+		redisInfo.listenChannelsMutex.Lock()
+		alreadyListening := redisInfo.listenChannels[channel]
+		redisInfo.listenChannelsMutex.Unlock()
 
-		// Create the web socket
-		ws, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Warnf("web socket creation failed: %s", err)
-			return
+		if !alreadyListening {
+			// Start a new database listener for this channel
+			go listenForNotify(ctx, channel)
+			w.WriteHeader(200)
+			w.Write([]byte(fmt.Sprintf("Started listening to channel '%s' and publishing to Redis\n", channel)))
+		} else {
+			w.WriteHeader(200)
+			w.Write([]byte(fmt.Sprintf("Already listening to channel '%s'\n", channel)))
 		}
-		log.Debugf("created websocket %d for channel '%s'", wsNumber, wsChannel)
-		wsMutex := sync.Mutex{}
-		defer ws.Close()
-
-		// Only start a new database listener for new channels.
-		// All other sockets just hang off the first listeners
-		// relay broadcasts.
-		rm := socketInfo.relayPool
-		newChannel := rm.HasChannel(wsChannel)
-		if !newChannel {
-			go listenForNotify(ctx, wsChannel)
-		}
-		socketInfo.relayPoolMutex.Lock()
-		relay := rm.GetRelay(wsChannel)
-		socketInfo.relayPoolMutex.Unlock()
-
-		// Listen to the broadcasts for this channel
-		relayListener := (*relay).Listener(1)
-
-		// Goroutine to monitor the relay listener and send messages
-		// to the web socket client when new notifications arrive
-		ctxWsCtx, wsCancel := context.WithCancel(ctx)
-		go func(i int, lstnr *broadcast.Listener[pgconn.Notification], lstnrCtx context.Context) {
-			defer lstnr.Close()
-			// var n pgconn.Notification
-			for {
-				select {
-				case n := <-lstnr.Ch():
-					log.Debugf("sending notification to web socket %d: %s", i, n.Payload)
-					bPayload := []byte(n.Payload)
-					wsMutex.Lock()
-					if err := ws.WriteMessage(websocket.TextMessage, bPayload); err != nil {
-						log.Debugf("web socket %d closed connection", i)
-						return
-					}
-					wsMutex.Unlock()
-				case <-lstnrCtx.Done():
-					log.Debugf("shutting down listener for web socket %d", i)
-					return
-				}
-			}
-		}(wsNumber, relayListener, ctxWsCtx)
-
-		// Keep this web socket open as long as the client keeps
-		// its side open
-		for {
-			select {
-			case <-time.After(2 * time.Second):
-				wsMutex.Lock()
-				wserr := ws.WriteMessage(websocket.PingMessage, []byte("ping"))
-				wsMutex.Unlock()
-				// When socket no longer accepts writes, end this function,
-				// which will do the defered close of the socket and listener
-				if wserr != nil {
-					log.Infof("Closing idle web socket %d", wsNumber)
-					ws.Close()
-					wsCancel()
-					return
-				}
-			case <-ctx.Done():
-				log.Debugf("webSocketHandler, closing websocket %d", wsNumber)
-				ws.Close()
-				wsCancel()
-				return
-			}
-		}
-		// h.ServeHTTP(w, r)
 	})
 }
 
@@ -473,13 +351,15 @@ func requestIndexHTML(w http.ResponseWriter, r *http.Request) {
 	}).Trace("requestIndexHTML")
 
 	type IndexFields struct {
-		BaseURL  string
-		Channels string
+		BaseURL   string
+		Channels  string
+		RedisAddr string
 	}
 
 	indexFields := IndexFields{
-		BaseURL:  serverWsBase(r),
-		Channels: strings.Join(viper.GetStringSlice("Channels"), ", "),
+		BaseURL:   serverBase(r),
+		Channels:  strings.Join(viper.GetStringSlice("Channels"), ", "),
+		RedisAddr: viper.GetString("RedisAddr"),
 	}
 
 	tmpl, err := template.ParseFiles(fmt.Sprintf("%s/index.html", viper.GetString("AssetsPath")))

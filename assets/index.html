@@ -7,100 +7,58 @@
     h1 {padding:1em;margin:0;width:auto;background:#0167B4;color:white;}
     #content {padding:1em 2em;line-height:1.3em;}
     h2 {font-size:120%;}
+    .status {font-weight:bold;margin:1em 0;}
+    .info {background:#f0f0f0;padding:1em;margin:1em 0;border-radius:5px;}
   </style>
 <body>
   <h1>pg_eventserv</h1>
   <div id="content">
-    <p>Enter a channel name and click "Connect".<br/>
-      Channels available: {{ .Channels }}</p>
-    <p><input type="text" id="channel">&nbsp;<input type="button" value="Connect" onClick="connect()"></p>
+    <h2>PostgreSQL to Redis Event Bridge</h2>
+    <div class="info">
+      <p>This service listens to PostgreSQL NOTIFY events and publishes them to Redis channels.</p>
+      <p><strong>Available channels:</strong> {{ .Channels }}</p>
+      <p><strong>Redis server:</strong> {{ .RedisAddr }}</p>
+    </div>
+    
+    <h2>Start Channel Listener</h2>
+    <p>Enter a channel name to start listening to PostgreSQL NOTIFY events and publishing them to Redis:</p>
+    <p><input type="text" id="channel" placeholder="channel_name">&nbsp;<input type="button" value="Start Listening" onClick="startListener()"></p>
+    
     <div id="channels">
+    </div>
+    
+    <h2>How to Subscribe</h2>
+    <div class="info">
+      <p>To receive events, subscribe to the Redis channel using any Redis client:</p>
+      <pre>SUBSCRIBE channel_name</pre>
+      <p>Example using redis-cli:</p>
+      <pre>redis-cli subscribe channel_name</pre>
     </div>
   </div>
   <script>
-    // all the sockets we have connected to
-    var sockets = [];
-
-    // run when the "Connect" button is clicked
-    function connect() {
+    function startListener() {
       var channel = document.getElementById("channel").value;
+      if (!channel) {
+        alert("Please enter a channel name");
+        return;
+      }
+      
       var url = "{{ .BaseURL }}/listen/" + channel;
       var channelsDiv = document.getElementById("channels");
       var div = document.createElement("div");
+      div.className = "status";
       channelsDiv.append(div);
-      div.innerHTML = `<hr/><p id="status_${channel}">Connecting to <b>${channel}</b>...</p><p><textarea id="content_${channel}" rows="10" cols="80"></textarea></p>`;
-      var outputStatus = document.getElementById(`status_${channel}`);
-      var outputContent = document.getElementById(`content_${channel}`);
-      var ws = new WebSocket(url);
-      if (ws) {
-        sockets.push(ws);
-        ws.onopen = function () {
-          outputStatus.innerHTML = `Connected to <b>${channel}</b>`;
-        };
-        ws.onerror = function(error) {
-          console.log(error);
-        };
-        ws.onmessage = function (msg) {
-          try {
-            var msg_json = JSON.parse(msg.data);
-            outputContent.innerHTML += JSON.stringify(msg_json, null, 2) + "\n";
-          }
-          catch (err) {
-            outputContent.innerHTML += msg.data + "\n";
-          }
-          outputContent.scrollTop = outputContent.scrollHeight;
-        }
-        ws.onclose = function(event) {
-          console.log("ws.onclose called");
-          outputStatus.innerHTML = `Connection to <b>${channel}</b> closed (${event.code})\n`;
-          // outputContent.innerHTML = wsCloseReason(event.code);
-        }
-      }
+      
+      fetch(url)
+        .then(response => response.text())
+        .then(data => {
+          div.innerHTML = `✓ ${data}`;
+        })
+        .catch(error => {
+          div.innerHTML = `✗ Error: ${error}`;
+        });
     }
-
-    // when navigating away from the page, shut down all the sockets
-    // on the way out
-    window.onbeforeunload = function(event) {
-      sockets.forEach((ws) => {
-        ws.close(1000);
-      });
-    }
-
-    function wsCloseReason(code) {
-      var reason;
-      if (code == 1000)
-        reason = "Normal closure, meaning that the purpose for which the connection was established has been fulfilled.";
-      else if(code == 1001)
-          reason = "An endpoint is \"going away\", such as a server going down or a browser having navigated away from a page.";
-      else if(code == 1002)
-          reason = "An endpoint is terminating the connection due to a protocol error";
-      else if(code == 1003)
-          reason = "An endpoint is terminating the connection because it has received a type of data it cannot accept (e.g., an endpoint that understands only text data MAY send this if it receives a binary message).";
-      else if(code == 1004)
-          reason = "Reserved. The specific meaning might be defined in the future.";
-      else if(code == 1005)
-          reason = "No status code was actually present.";
-      else if(code == 1006)
-          reason = "The connection was closed abnormally, e.g., without sending or receiving a Close control frame";
-      else if(code == 1007)
-          reason = "An endpoint is terminating the connection because it has received data within a message that was not consistent with the type of the message (e.g., non-UTF-8 [https://www.rfc-editor.org/rfc/rfc3629] data within a text message).";
-      else if(code == 1008)
-          reason = "An endpoint is terminating the connection because it has received a message that \"violates its policy\". This reason is given either if there is no other sutible reason, or if there is a need to hide specific details about the policy.";
-      else if(code == 1009)
-          reason = "An endpoint is terminating the connection because it has received a message that is too big for it to process.";
-      else if(code == 1010) // Note that this status code is not used by the server, because it can fail the WebSocket handshake instead.
-          reason = "An endpoint (client) is terminating the connection because it has expected the server to negotiate one or more extension, but the server didn't return them in the response message of the WebSocket handshake. <br /> Specifically, the extensions that are needed are: " + event.reason;
-      else if(code == 1011)
-          reason = "A server is terminating the connection because it encountered an unexpected condition that prevented it from fulfilling the request.";
-      else if(code == 1015)
-          reason = "The connection was closed due to a failure to perform a TLS handshake (e.g., the server certificate can't be verified).";
-      else
-          reason = "Unknown reason";
-      return reason;
-    }
-
   </script>
-
 </div>
 </body>
 </html>

@@ -42,18 +42,8 @@ func serverURLBase(r *http.Request) string {
 	return formatBaseURL(baseHost, basePath)
 }
 
-func serverWsBase(r *http.Request) string {
-	urlBase := serverURLBase(r)
-	u, err := url.Parse(urlBase)
-	if err != nil {
-		log.Fatal(err)
-	}
-	scheme := "ws"
-	if r.TLS != nil {
-		scheme = "wss"
-	}
-	u.Scheme = scheme
-	return u.String()
+func serverBase(r *http.Request) string {
+	return serverURLBase(r)
 }
 
 // serverURLHost returns the host (and scheme)

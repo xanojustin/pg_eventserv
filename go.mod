@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v4 v4.17.2
 	github.com/komem3/glob v0.0.0-20220810040902-7dfb5f3c78ae
 	github.com/pborman/getopt/v2 v2.1.0
+	github.com/redis/go-redis/v9 v9.3.0
 	github.com/sirupsen/logrus v1.9.0
 	github.com/spf13/viper v1.13.0
 	github.com/teivah/broadcast v0.1.0
