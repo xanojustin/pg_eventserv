@@ -246,6 +246,7 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 		err = redisPublish(ctx, listenChannel, notification.Payload)
 		if err != nil {
 			log.Errorf("Failed to publish to Redis: %s", err)
+			// Continue processing rather than exiting - Redis will reconnect automatically
 		}
 	}
 }
