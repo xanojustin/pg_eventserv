@@ -77,7 +77,13 @@ for message in pubsub.listen():
 
 ### Channel Configuration
 
-The server automatically starts listening to the channel specified in the configuration (default: `events`). All PostgreSQL notifications on this channel are published to the same Redis channel name.
+The server listens to a single PostgreSQL channel that can be configured through:
+- Command-line flag: `--channel channelname`
+- Environment variable: `ES_LISTENCHANNEL=channelname`
+- Configuration file: `ListenChannel = "channelname"`
+- Default value: `events`
+
+All PostgreSQL notifications on this channel are published to the same Redis channel name. This allows you to customize the channel name to match your application's needs.
 
 ### Raising a Notification
 
@@ -202,6 +208,8 @@ $$
     END;
 $$ LANGUAGE 'plpgsql';
 ```
+
+Note: Ensure your trigger function uses the same channel name that pg_eventserv is configured to listen to.
 
 Then send in some updates that pass the filter and others that don't:
 
