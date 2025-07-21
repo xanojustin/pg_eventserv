@@ -58,7 +58,7 @@ func init() {
 	// 1d, 1h, 1m, 1s, see https://golang.org/pkg/time/#ParseDuration
 	viper.SetDefault("DbPoolMaxConnLifeTime", "1h")
 	viper.SetDefault("DbPoolMaxConns", 4)
-	viper.SetDefault("ListenChannel", "events")
+	viper.SetDefault("ListenChannel", "channelname")
 	if programVersion == "" {
 		programVersion = "latest"
 	}

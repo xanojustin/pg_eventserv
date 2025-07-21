@@ -41,3 +41,6 @@
 
 # Output extra logging information?
 # Debug = false
+
+# PostgreSQL channel to listen to
+# ListenChannel = "channelname"
