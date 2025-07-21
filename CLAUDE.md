@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-pg_eventserv is a PostgreSQL event server written in Go that bridges PostgreSQL's NOTIFY/LISTEN functionality with Redis pub/sub channels, allowing any Redis client to receive PostgreSQL notifications.
+pg_eventserv is a PostgreSQL event server written in Go that bridges PostgreSQL's NOTIFY/LISTEN functionality with Redis pub/sub channels. It listens to a single configured PostgreSQL channel and publishes all notifications to the corresponding Redis channel.
 
 ## Development Commands
 
@@ -37,32 +37,28 @@ export ES_REDISADDR=localhost:6379
 ```
 
 ### Testing
-The project has no automated tests. Use the built-in web interface at http://localhost:7700/ to start channel listeners, and use any Redis client to subscribe to channels for testing.
+The project has no automated tests. The server automatically starts listening to the configured channel. Use any Redis client to subscribe to the channel for testing.
 
 ## Architecture
 
 ### Core Components
 
-1. **main.go**: HTTP server setup, channel listener management, and signal handling
+1. **main.go**: Main server, channel listener, and signal handling
 2. **db.go**: PostgreSQL connection pool management using pgx
 3. **redis.go**: Redis client and pub/sub functionality
-4. **util.go**: URL formatting and proxy header utilities
 
-### Request Flow
+### Event Flow
 
-1. Client makes HTTP request to: `http://host:7700/listen/{channel}`
-2. Channel name validated against allowed patterns (glob matching)
-3. Database listener goroutine created for new channels
-4. PostgreSQL NOTIFY events are published to Redis channels
-5. Redis subscribers receive events via pub/sub
+1. Server starts and connects to PostgreSQL and Redis
+2. Automatically starts listening to configured channel (default: 'events')
+3. PostgreSQL NOTIFY events are published to Redis channel
+4. Redis subscribers receive events via pub/sub
 
 ### Key Dependencies
 
-- `gorilla/mux`: HTTP routing
 - `jackc/pgx/v4`: PostgreSQL driver with connection pooling
 - `redis/go-redis/v9`: Redis client library
 - `spf13/viper`: Configuration management (TOML files, env vars, flags)
-- `komem3/glob`: Channel pattern matching
 
 ### Configuration Hierarchy
 
@@ -95,7 +91,6 @@ $$ LANGUAGE plpgsql;
 ## Code Conventions
 
 - Error handling uses log.Fatal for startup failures
-- Goroutines for each database listener with proper cleanup
+- Single goroutine for database listener with proper cleanup
 - Mutex protection for shared state (RelayPool)
 - Configuration keys use PascalCase
-- HTTP handlers return JSON errors with appropriate status codes
