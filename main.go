@@ -60,6 +60,7 @@ func init() {
 	viper.SetDefault("DbPoolMaxConns", 4)
 	viper.SetDefault("ListenChannel", "channelname")
 	viper.SetDefault("RedisListKey", "channelevents")
+	viper.SetDefault("RedisQueueMaxSize", 10000)
 	if programVersion == "" {
 		programVersion = "latest"
 	}

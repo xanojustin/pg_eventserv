@@ -12,11 +12,22 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type QueuedMessage struct {
+	Channel string
+	Message string
+	Timestamp time.Time
+}
+
 var (
 	globalRedis *redis.Client = nil
 	redisConnMutex sync.RWMutex
 	retryAttempt int
 	lastSuccessfulConnect time.Time
+	
+	// Message queue for when Redis is down
+	messageQueue []QueuedMessage
+	queueMutex sync.Mutex
+	maxQueueSize int
 )
 
 func redisConnect() (*redis.Client, error) {
@@ -28,6 +39,7 @@ func redisConnect() (*redis.Client, error) {
 	redisDB := viper.GetInt("RedisDB")
 	redisMaxRetries := viper.GetInt("RedisMaxRetries")
 	redisPoolSize := viper.GetInt("RedisPoolSize")
+	maxQueueSize = viper.GetInt("RedisQueueMaxSize")
 
 	log.WithFields(log.Fields{
 		"addr": redisAddr,
@@ -56,6 +68,10 @@ func redisConnect() (*redis.Client, error) {
 	retryAttempt = 0
 	lastSuccessfulConnect = time.Now()
 	log.Info("Connected to Redis successfully")
+	
+	// Process any queued messages when reconnecting
+	go flushQueuedMessages()
+	
 	return client, nil
 }
 
@@ -108,36 +124,118 @@ func ensureRedisConnection(ctx context.Context) error {
 	}
 }
 
-func redisPublish(ctx context.Context, channel string, message string) error {
-	// Ensure we have a valid Redis connection
-	if err := ensureRedisConnection(ctx); err != nil {
-		return fmt.Errorf("failed to establish Redis connection: %w", err)
+func queueMessage(channel, message string) {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	
+	// Add message to queue
+	queuedMsg := QueuedMessage{
+		Channel:   channel,
+		Message:   message,
+		Timestamp: time.Now(),
 	}
+	
+	messageQueue = append(messageQueue, queuedMsg)
+	log.Warnf("Queued message for channel '%s' (queue size: %d)", channel, len(messageQueue))
+	
+	// Prevent unbounded growth by removing oldest messages if needed
+	if len(messageQueue) > maxQueueSize {
+		removed := len(messageQueue) - maxQueueSize
+		messageQueue = messageQueue[removed:]
+		log.Warnf("Message queue full, removed %d oldest messages", removed)
+	}
+}
 
+func flushQueuedMessages() {
+	queueMutex.Lock()
+	queuedMessages := make([]QueuedMessage, len(messageQueue))
+	copy(queuedMessages, messageQueue)
+	messageQueue = messageQueue[:0] // Clear the queue
+	queueMutex.Unlock()
+	
+	if len(queuedMessages) == 0 {
+		return
+	}
+	
+	log.Infof("Flushing %d queued messages to Redis", len(queuedMessages))
+	
+	ctx := context.Background()
+	successCount := 0
+	
+	for _, msg := range queuedMessages {
+		err := redisPublishDirect(ctx, msg.Channel, msg.Message)
+		if err != nil {
+			log.Errorf("Failed to flush queued message: %s", err)
+			// Re-queue failed messages
+			queueMessage(msg.Channel, msg.Message)
+		} else {
+			successCount++
+		}
+	}
+	
+	log.Infof("Successfully flushed %d/%d queued messages", successCount, len(queuedMessages))
+}
+
+func redisPublishDirect(ctx context.Context, channel string, message string) error {
 	redisConnMutex.RLock()
 	client := globalRedis
 	redisConnMutex.RUnlock()
-
+	
 	if client == nil {
 		return fmt.Errorf("Redis client not initialized")
 	}
-
+	
 	// Get the configured list key
 	listKey := viper.GetString("RedisListKey")
-
+	
 	// First, push the message to the Redis list
 	err := client.RPush(ctx, listKey, message).Err()
 	if err != nil {
 		return fmt.Errorf("failed to push to Redis list %s: %w", listKey, err)
 	}
 	log.Debugf("Pushed message to Redis list '%s': %s", listKey, message)
-
+	
 	// Then publish notification to the channel
 	err = client.Publish(ctx, channel, message).Err()
 	if err != nil {
 		return fmt.Errorf("failed to publish to Redis channel %s: %w", channel, err)
 	}
-
+	
 	log.Debugf("Published message to Redis channel '%s': %s", channel, message)
+	return nil
+}
+
+func redisPublish(ctx context.Context, channel string, message string) error {
+	// Quick check if Redis is available
+	redisConnMutex.RLock()
+	client := globalRedis
+	redisConnMutex.RUnlock()
+	
+	// If Redis client is nil, queue the message immediately
+	if client == nil {
+		log.Debugf("Redis not connected, queuing message for channel '%s'", channel)
+		queueMessage(channel, message)
+		return nil
+	}
+	
+	// Test if Redis is actually working with a quick ping
+	testCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	err := client.Ping(testCtx).Err()
+	cancel()
+	
+	if err != nil {
+		log.Debugf("Redis ping failed (%s), queuing message for channel '%s'", err, channel)
+		queueMessage(channel, message)
+		return nil
+	}
+	
+	// Try to publish directly
+	err = redisPublishDirect(ctx, channel, message)
+	if err != nil {
+		log.Debugf("Redis publish failed (%s), queuing message for channel '%s'", err, channel)
+		queueMessage(channel, message)
+		return nil
+	}
+	
 	return nil
 }
