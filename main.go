@@ -139,13 +139,17 @@ func main() {
 	// Make a database connection pool
 	dbPool, err := dbConnect()
 	if err != nil {
-		os.Exit(1)
+		log.Errorf("Initial database connection failed: %s", err)
+		log.Info("Will retry database connection with exponential backoff...")
+		// Start with a nil pool - the listener will handle reconnection
+		dbPool = nil
 	}
 
 	// Connect to Redis
 	_, err = redisConnect()
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %s", err)
+		log.Errorf("Initial Redis connection failed: %s", err)
+		log.Info("Will retry Redis connection with exponential backoff...")
 	}
 
 	redisCtx := RedisContext{
@@ -162,7 +166,7 @@ func main() {
 	// Start listening to the configured channel
 	go listenForNotify(ctxCancel, listenChannel)
 
-	// Start database health check goroutine
+	// Start database reconnection goroutine
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -170,15 +174,30 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				// Try to ping the database
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				err := dbPool.Ping(ctx)
-				cancel()
-
-				if err != nil {
-					log.Fatalf("Database health check failed: %s", err)
+				// Ensure database connection is healthy
+				err := ensureDbConnection(ctxCancel)
+				if err != nil && ctxCancel.Err() == nil {
+					log.Errorf("Database connection check failed: %s", err)
 				}
-				log.Trace("Database health check passed")
+			case <-ctxCancel.Done():
+				return
+			}
+		}
+	}()
+	
+	// Start Redis reconnection goroutine
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Ensure Redis connection is healthy
+				err := ensureRedisConnection(ctxCancel)
+				if err != nil && ctxCancel.Err() == nil {
+					log.Errorf("Redis connection check failed: %s", err)
+				}
 			case <-ctxCancel.Done():
 				return
 			}
@@ -197,7 +216,6 @@ func main() {
 // Goroutine to watch a PgSQL LISTEN/NOTIFY channel, and
 // publish the notification to Redis
 func listenForNotify(ctx context.Context, listenChannel string) {
-
 	redisInfo := ctx.Value("redisCtx").(RedisContext)
 
 	// Mark this channel as being listened to
@@ -205,50 +223,105 @@ func listenForNotify(ctx context.Context, listenChannel string) {
 	redisInfo.listenChannels[listenChannel] = true
 	redisInfo.listenChannelsMutex.Unlock()
 
-	// Draw a connection from the pool to use for listening
-	conn, err := redisInfo.db.Acquire(ctx)
-	if err != nil {
-		// Check if this is a context cancellation (normal shutdown)
-		if ctx.Err() != nil {
-			log.Debugf("Connection acquisition cancelled: %s", err)
-			return
-		}
-		// Otherwise, this is a database connection error
-		log.Fatalf("Error acquiring database connection: %s", err)
-	}
-	defer conn.Release()
-	log.Infof("Listening to the '%s' database channel", listenChannel)
-
-	// Send the LISTEN command to the connection
-	listenSQL := fmt.Sprintf("LISTEN %s", pgx.Identifier{listenChannel}.Sanitize())
-	_, err = conn.Exec(ctx, listenSQL)
-	if err != nil {
-		log.Fatalf("Error listening to '%s' channel: %s", listenChannel, err)
-	}
-
-	// Wait for notifications to come off the connection
 	for {
-		notification, err := conn.Conn().WaitForNotification(ctx)
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.Debug("Listen goroutine shutting down")
+			return
+		default:
+		}
+
+		// Ensure we have a database connection
+		err := ensureDbConnection(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Errorf("Failed to establish database connection: %s", err)
+			continue
+		}
+
+		// Get the current database pool
+		dbConnMutex.RLock()
+		currentDb := globalDb
+		dbConnMutex.RUnlock()
+
+		if currentDb == nil {
+			log.Warn("Database pool is nil, waiting for connection...")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Draw a connection from the pool to use for listening
+		conn, err := currentDb.Acquire(ctx)
 		if err != nil {
 			// Check if this is a context cancellation (normal shutdown)
 			if ctx.Err() != nil {
-				log.Debugf("WaitForNotification context cancelled: %s", err)
+				log.Debugf("Connection acquisition cancelled: %s", err)
 				return
 			}
 			// Otherwise, this is a database connection error
-			log.Fatalf("Database connection lost on channel '%s': %s", listenChannel, err)
+			log.Errorf("Error acquiring database connection: %s", err)
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
-		log.Debugf("NOTIFY received, channel '%s', payload '%s'",
-			notification.Channel,
-			notification.Payload)
+		log.Infof("Listening to the '%s' database channel", listenChannel)
 
-		// Publish the notification to Redis
-		err = redisPublish(ctx, listenChannel, notification.Payload)
+		// Send the LISTEN command to the connection
+		listenSQL := fmt.Sprintf("LISTEN %s", pgx.Identifier{listenChannel}.Sanitize())
+		_, err = conn.Exec(ctx, listenSQL)
 		if err != nil {
-			log.Errorf("Failed to publish to Redis: %s", err)
-			// Continue processing rather than exiting - Redis will reconnect automatically
+			log.Errorf("Error listening to '%s' channel: %s", listenChannel, err)
+			conn.Release()
+			time.Sleep(5 * time.Second)
+			continue
 		}
+
+		// Process notifications until connection fails
+		connectionLost := false
+		for !connectionLost {
+			notification, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				// Check if this is a context cancellation (normal shutdown)
+				if ctx.Err() != nil {
+					log.Debugf("WaitForNotification context cancelled: %s", err)
+					conn.Release()
+					return
+				}
+				// Otherwise, this is a database connection error
+				log.Errorf("Database connection lost on channel '%s': %s", listenChannel, err)
+				connectionLost = true
+				break
+			}
+
+			log.Debugf("NOTIFY received, channel '%s', payload '%s'",
+				notification.Channel,
+				notification.Payload)
+
+			// Publish the notification to Redis
+			err = redisPublish(ctx, listenChannel, notification.Payload)
+			if err != nil {
+				log.Errorf("Failed to publish to Redis: %s", err)
+				// Continue processing rather than exiting - Redis will reconnect automatically
+			}
+		}
+
+		// Release the connection before retrying
+		conn.Release()
+
+		// Mark the global database as potentially bad to trigger reconnection
+		dbConnMutex.Lock()
+		if globalDb != nil {
+			globalDb.Close()
+			globalDb = nil
+		}
+		dbConnMutex.Unlock()
+
+		log.Warn("Database listener disconnected, will attempt to reconnect...")
+		// Small delay before retrying
+		time.Sleep(5 * time.Second)
 	}
 }
 
