@@ -50,6 +50,7 @@ func init() {
 	viper.SetDefault("DbConnection", "sslmode=disable")
 	viper.SetDefault("RedisAddr", "localhost:6379")
 	viper.SetDefault("RedisPassword", "")
+	viper.SetDefault("RedisPrefix", "")
 	viper.SetDefault("RedisDB", 0)
 	viper.SetDefault("RedisMaxRetries", 3)
 	viper.SetDefault("RedisPoolSize", 10)

@@ -106,6 +106,7 @@ SELECT pg_notify('people', 'message to send');
 - `DATABASE_URL`: PostgreSQL connection string
 - `ES_REDISADDR`: Redis server address (default: localhost:6379)
 - `ES_REDISPASSWORD`: Redis password (if required)
+- `ES_REDISPREFIX`: Redis key prefix for all operations (default: empty)
 - `ES_REDISDB`: Redis database number (default: 0)
 - `ES_LISTENCHANNEL`: PostgreSQL channel to listen to (default: events)
 - `ES_DEBUG`: Enable debug logging

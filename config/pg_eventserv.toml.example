@@ -44,3 +44,13 @@
 
 # PostgreSQL channel to listen to
 # ListenChannel = "channelname"
+
+# Redis configuration
+# RedisAddr = "localhost:6379"
+# RedisPassword = ""
+# RedisPrefix = ""
+# RedisDB = 0
+# RedisMaxRetries = 3
+# RedisPoolSize = 10
+# RedisListKey = "channelevents"
+# RedisQueueMaxSize = 10000

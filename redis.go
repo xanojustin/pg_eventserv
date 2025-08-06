@@ -18,6 +18,56 @@ type QueuedMessage struct {
 	Timestamp time.Time
 }
 
+// prefixHook adds a prefix to all Redis keys
+type prefixHook struct {
+	prefix string
+}
+
+func (h prefixHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h prefixHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if h.prefix != "" {
+			h.addPrefixToCmd(cmd)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h prefixHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if h.prefix != "" {
+			for _, cmd := range cmds {
+				h.addPrefixToCmd(cmd)
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func (h prefixHook) addPrefixToCmd(cmd redis.Cmder) {
+	switch cmd.Name() {
+	// Commands with key as first argument
+	case "rpush", "lpush", "llen", "lrange", "ltrim", "get", "set", "del", "exists", "expire", "ttl", "incr", "decr":
+		args := cmd.Args()
+		if len(args) > 1 {
+			if key, ok := args[1].(string); ok {
+				args[1] = h.prefix + key
+			}
+		}
+	// PUBLISH has channel as first argument
+	case "publish":
+		args := cmd.Args()
+		if len(args) > 1 {
+			if channel, ok := args[1].(string); ok {
+				args[1] = h.prefix + channel
+			}
+		}
+	}
+}
+
 var (
 	globalRedis *redis.Client = nil
 	redisConnMutex sync.RWMutex
@@ -36,6 +86,7 @@ func redisConnect() (*redis.Client, error) {
 
 	redisAddr := viper.GetString("RedisAddr")
 	redisPassword := viper.GetString("RedisPassword")
+	redisPrefix := viper.GetString("RedisPrefix")
 	redisDB := viper.GetInt("RedisDB")
 	redisMaxRetries := viper.GetInt("RedisMaxRetries")
 	redisPoolSize := viper.GetInt("RedisPoolSize")
@@ -44,6 +95,7 @@ func redisConnect() (*redis.Client, error) {
 	log.WithFields(log.Fields{
 		"addr": redisAddr,
 		"db":   redisDB,
+		"prefix": redisPrefix,
 	}).Info("Connecting to Redis")
 
 	client := redis.NewClient(&redis.Options{
@@ -56,6 +108,12 @@ func redisConnect() (*redis.Client, error) {
 		ReadTimeout: 3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 	})
+
+	// Add prefix hook if prefix is configured
+	if redisPrefix != "" {
+		client.AddHook(prefixHook{prefix: redisPrefix})
+		log.Infof("Redis key prefix enabled: %s", redisPrefix)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
