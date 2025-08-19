@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,13 +94,21 @@ func redisConnect() (*redis.Client, error) {
 	redisPoolSize := viper.GetInt("RedisPoolSize")
 	maxQueueSize = viper.GetInt("RedisQueueMaxSize")
 
+	// Check if the address has tls:// prefix
+	useTLS := false
+	if strings.HasPrefix(redisAddr, "tls://") {
+		useTLS = true
+		redisAddr = strings.TrimPrefix(redisAddr, "tls://")
+	}
+
 	log.WithFields(log.Fields{
 		"addr": redisAddr,
 		"db":   redisDB,
 		"prefix": redisPrefix,
+		"tls": useTLS,
 	}).Info("Connecting to Redis")
 
-	client := redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr:        redisAddr,
 		Password:    redisPassword,
 		DB:          redisDB,
@@ -107,7 +117,16 @@ func redisConnect() (*redis.Client, error) {
 		PoolTimeout: 4 * time.Second,
 		ReadTimeout: 3 * time.Second,
 		WriteTimeout: 3 * time.Second,
-	})
+	}
+
+	// Configure TLS if the prefix was present
+	if useTLS {
+		options.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
+	client := redis.NewClient(options)
 
 	// Add prefix hook if prefix is configured
 	if redisPrefix != "" {
